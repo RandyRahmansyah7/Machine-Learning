@@ -1,36 +1,60 @@
 """
 data_prep.py
-Validasi & pembersihan dataset inventaris sebelum masuk ke training.
+============
 
-Tugas:
-- Cek skema kolom & tipe data
-- Cek missing values & duplikat sku_id
-- Cek nilai yang tidak masuk akal (stok negatif, probabilitas non-binary, dll)
-- Simpan dataset bersih siap latih
+Validate and clean the raw inventory dataset before model training.
 
-Jalankan: python data_prep.py
-Input   : inventory_dataset.csv (raw)
-Output  : inventory_dataset_clean.csv
+Responsibilities
+----------------
+- Validate required schema
+- Validate data types
+- Handle missing values
+- Remove duplicate SKU IDs
+- Validate business rules and value ranges
+- Save a clean dataset for training
+
+Run:
+    python data_prep.py
+
+Input:
+    inventory_dataset.csv
+
+Output:
+    inventory_dataset_clean.csv
 """
 
-import sys
+from __future__ import annotations
+
+import logging
+from pathlib import Path
 
 import pandas as pd
+from pandas.api.types import (
+    is_float_dtype,
+    is_integer_dtype,
+    is_object_dtype,
+)
 
-RAW_PATH = "inventory_dataset.csv"
-CLEAN_PATH = "inventory_dataset_clean.csv"
+# =============================================================================
+# Configuration
+# =============================================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+
+RAW_PATH = BASE_DIR / "inventory_dataset.csv"
+CLEAN_PATH = BASE_DIR / "inventory_dataset_clean.csv"
 
 EXPECTED_COLUMNS = {
-    "sku_id": "object",
-    "current_stock": "int64",
-    "avg_daily_sales": "float64",
-    "sales_volatility": "float64",
-    "supplier_lead_time_days": "int64",
-    "safety_stock_level": "int64",
-    "reorder_point": "int64",
-    "seasonality_index": "float64",
-    "historical_stockout_count": "int64",
-    "will_stockout_next_30_days": "int64",
+    "sku_id": "string",
+    "current_stock": "int",
+    "avg_daily_sales": "float",
+    "sales_volatility": "float",
+    "supplier_lead_time_days": "int",
+    "safety_stock_level": "int",
+    "reorder_point": "int",
+    "seasonality_index": "float",
+    "historical_stockout_count": "int",
+    "will_stockout_next_30_days": "int",
 }
 
 NON_NEGATIVE_COLUMNS = [
@@ -43,93 +67,223 @@ NON_NEGATIVE_COLUMNS = [
     "historical_stockout_count",
 ]
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(message)s",
+)
 
-def load_raw(path: str) -> pd.DataFrame:
-    try:
-        df = pd.read_csv(path)
-    except FileNotFoundError:
-        sys.exit(f"[ERROR] File tidak ditemukan: {path}")
-    return df
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Load Dataset
+# =============================================================================
+
+
+def load_raw(path: Path) -> pd.DataFrame:
+    """
+    Load raw dataset.
+
+    Parameters
+    ----------
+    path : Path
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset not found: {path}")
+
+    return pd.read_csv(path)
+
+
+# =============================================================================
+# Schema Validation
+# =============================================================================
 
 
 def check_schema(df: pd.DataFrame) -> None:
+    """
+    Validate required columns and data types.
+    """
+
     missing_cols = set(EXPECTED_COLUMNS) - set(df.columns)
     if missing_cols:
-        sys.exit(f"[ERROR] Kolom hilang dari dataset: {missing_cols}")
+        raise ValueError(f"Missing columns: {sorted(missing_cols)}")
 
     extra_cols = set(df.columns) - set(EXPECTED_COLUMNS)
     if extra_cols:
-        print(f"[WARNING] Kolom tak dikenal ditemukan (akan diabaikan): {extra_cols}")
+        logger.warning("Extra columns detected (ignored): %s", sorted(extra_cols))
 
-    print("[OK] Skema kolom sesuai spesifikasi.")
+    for col, expected in EXPECTED_COLUMNS.items():
+
+        if expected == "int":
+            if not is_integer_dtype(df[col]):
+                raise TypeError(f"Column '{col}' must be integer.")
+
+        elif expected == "float":
+            if not (is_float_dtype(df[col]) or is_integer_dtype(df[col])):
+                raise TypeError(f"Column '{col}' must be numeric.")
+
+        elif expected == "string":
+            if not is_object_dtype(df[col]):
+                raise TypeError(f"Column '{col}' must be string/object.")
+
+    logger.info("Schema validation passed.")
 
 
-def check_missing(df: pd.DataFrame) -> pd.DataFrame:
-    n_missing = df.isnull().sum().sum()
-    if n_missing > 0:
-        print(f"[WARNING] Ditemukan {n_missing} nilai kosong, baris terkait akan dibuang.")
-        df = df.dropna()
+# =============================================================================
+# Missing Values
+# =============================================================================
+
+
+def remove_missing(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Remove rows containing missing values.
+    """
+
+    missing_summary = df.isna().sum()
+
+    if missing_summary.sum() > 0:
+
+        logger.warning("Missing values detected:")
+
+        for col, n in missing_summary.items():
+            if n > 0:
+                logger.warning("  %-30s %d", col, n)
+
+        before = len(df)
+        df = df.dropna().copy()
+        removed = before - len(df)
+
+        logger.info("%d rows removed due to missing values.", removed)
+
+        return df, removed
+
+    logger.info("No missing values found.")
+
+    return df, 0
+
+
+# =============================================================================
+# Duplicate SKU
+# =============================================================================
+
+
+def remove_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Remove duplicated SKU IDs.
+    """
+
+    before = len(df)
+
+    df = df.drop_duplicates(subset="sku_id", keep="first").copy()
+
+    removed = before - len(df)
+
+    if removed:
+        logger.warning("%d duplicate SKU IDs removed.", removed)
     else:
-        print("[OK] Tidak ada missing values.")
-    return df
+        logger.info("No duplicate SKU IDs found.")
+
+    return df, removed
 
 
-def check_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-    n_dupes = df["sku_id"].duplicated().sum()
-    if n_dupes > 0:
-        print(f"[WARNING] Ditemukan {n_dupes} sku_id duplikat, hanya baris pertama yang dipertahankan.")
-        df = df.drop_duplicates(subset="sku_id", keep="first")
-    else:
-        print("[OK] Tidak ada sku_id duplikat.")
-    return df
+# =============================================================================
+# Business Rules
+# =============================================================================
 
 
-def check_value_ranges(df: pd.DataFrame) -> pd.DataFrame:
-    initial_len = len(df)
+def validate_business_rules(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Remove rows violating business rules.
+    """
 
-    # Nilai stok/waktu tidak boleh negatif
+    invalid = pd.Series(False, index=df.index)
+
+    # Non-negative values
     for col in NON_NEGATIVE_COLUMNS:
-        invalid = df[col] < 0
-        if invalid.any():
-            print(f"[WARNING] {invalid.sum()} baris dengan {col} negatif, akan dibuang.")
-            df = df[~invalid]
+        invalid |= df[col] < 0
 
-    # Target harus biner (0/1)
-    invalid_target = ~df["will_stockout_next_30_days"].isin([0, 1])
-    if invalid_target.any():
-        print(f"[WARNING] {invalid_target.sum()} baris dengan target non-biner, akan dibuang.")
-        df = df[~invalid_target]
+    # Binary target
+    invalid |= ~df["will_stockout_next_30_days"].isin([0, 1])
 
-    # seasonality_index seharusnya berada di sekitar 0.5 - 1.5 sesuai spesifikasi
-    out_of_range = ~df["seasonality_index"].between(0.3, 2.0)
-    if out_of_range.any():
-        print(f"[WARNING] {out_of_range.sum()} baris dengan seasonality_index di luar rentang wajar (0.3-2.0), akan dibuang.")
-        df = df[~out_of_range]
+    # Seasonality range
+    invalid |= ~df["seasonality_index"].between(0.3, 2.0)
 
-    removed = initial_len - len(df)
-    if removed == 0:
-        print("[OK] Semua nilai berada dalam rentang wajar.")
+    # Logical relationships
+    invalid |= df["reorder_point"] < df["safety_stock_level"]
+
+    invalid |= df["supplier_lead_time_days"] > 365
+
+    removed = int(invalid.sum())
+
+    if removed:
+        logger.warning("%d invalid rows removed.", removed)
+        df = df.loc[~invalid].copy()
     else:
-        print(f"[INFO] Total {removed} baris dibuang karena nilai tidak valid.")
+        logger.info("Business rule validation passed.")
 
-    return df
+    return df, removed
 
 
-def main():
-    print(f"Membaca dataset mentah: {RAW_PATH}")
+# =============================================================================
+# Save Dataset
+# =============================================================================
+
+
+def save_dataset(df: pd.DataFrame, path: Path) -> None:
+    """
+    Save cleaned dataset.
+    """
+
+    df.to_csv(path, index=False)
+
+    logger.info("Clean dataset saved to: %s", path)
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+
+def main() -> None:
+
+    logger.info("Loading dataset...")
     df = load_raw(RAW_PATH)
-    print(f"Jumlah baris awal: {len(df)}\n")
+
+    initial_rows = len(df)
+
+    logger.info("Initial rows: %d", initial_rows)
 
     check_schema(df)
-    df = check_missing(df)
-    df = check_duplicates(df)
-    df = check_value_ranges(df)
+
+    df, missing_removed = remove_missing(df)
+
+    df, duplicate_removed = remove_duplicates(df)
+
+    df, invalid_removed = validate_business_rules(df)
 
     df = df.reset_index(drop=True)
 
-    print(f"\nJumlah baris setelah pembersihan: {len(df)}")
-    df.to_csv(CLEAN_PATH, index=False)
-    print(f"Dataset bersih tersimpan di: {CLEAN_PATH}")
+    if df.empty:
+        raise ValueError(
+            "Dataset is empty after cleaning. Training cannot continue."
+        )
+
+    save_dataset(df, CLEAN_PATH)
+
+    logger.info("")
+    logger.info("=" * 45)
+    logger.info("DATA PREPARATION SUMMARY")
+    logger.info("=" * 45)
+    logger.info("Initial rows          : %d", initial_rows)
+    logger.info("Missing removed       : %d", missing_removed)
+    logger.info("Duplicates removed    : %d", duplicate_removed)
+    logger.info("Invalid rows removed  : %d", invalid_removed)
+    logger.info("Final rows            : %d", len(df))
+    logger.info("=" * 45)
 
 
 if __name__ == "__main__":

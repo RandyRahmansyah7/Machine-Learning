@@ -1,8 +1,19 @@
+# Dashboard
 streamlit==1.59.1
+
+# Data Processing
 pandas==2.2.3
-numpy>=2.0
-scikit-learn==1.8.0
-xgboost==3.3.0
-shap==0.52.0
-plotly==6.8.0
-joblib==1.5.3
+numpy==1.26.4
+
+# Machine Learning
+scikit-learn==1.5.2
+xgboost==2.1.4
+
+# Explainability
+shap==0.46.0
+
+# Visualization
+plotly==6.0.1
+
+# Model Serialization
+joblib==1.4.2
